@@ -1,5 +1,5 @@
 import psycopg2
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import re
@@ -14,8 +14,12 @@ if not all(os.getenv(var) for var in required_env_vars):
     raise ValueError("One or more environment variables are missing.")
 
 # Create Flask app instance
-app = Flask(__name__, static_folder='ui')
-app.secret_key = os.getenv('SECRET_KEY')
+app = Flask(__name__, static_folder='ui', static_url_path='')
+
+# Serve index.html for root URL
+@app.route('/')
+def index():
+    return send_from_directory(app.static_folder, 'index.html')
 
 # PostgreSQL connection function
 def get_postgres_connection():
