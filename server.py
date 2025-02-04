@@ -3,44 +3,32 @@ from flask import Flask, request, jsonify, session
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import re
-from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Debug: print loaded environment variables
-print("POSTGRES_HOST:", os.getenv('POSTGRES_HOST'))
-print("POSTGRES_USER:", os.getenv('POSTGRES_USER'))
-print("POSTGRES_PASSWORD:", os.getenv('POSTGRES_PASSWORD'))
-print("POSTGRES_DB:", os.getenv('POSTGRES_DB'))
-print("POSTGRES_PORT:", os.getenv('POSTGRES_PORT'))
+# Ensure all required environment variables are set
+required_env_vars = ['POSTGRES_HOST', 'POSTGRES_USER', 'POSTGRES_PASSWORD', 'POSTGRES_DB', 'POSTGRES_PORT', 'SECRET_KEY']
+if not all(os.getenv(var) for var in required_env_vars):
+    raise ValueError("One or more environment variables are missing.")
 
 # Create Flask app instance
 app = Flask(__name__, static_folder='ui')
+app.secret_key = os.getenv('SECRET_KEY')
 
-# PostgreSQL Config (using environment variables)
-app.config['POSTGRES_HOST'] = os.getenv('POSTGRES_HOST')
-app.config['POSTGRES_USER'] = os.getenv('POSTGRES_USER')
-app.config['POSTGRES_PASSWORD'] = os.getenv('POSTGRES_PASSWORD')
-app.config['POSTGRES_DB'] = os.getenv('POSTGRES_DB')
-app.config['POSTGRES_PORT'] = os.getenv('POSTGRES_PORT', 5432)
-
-# Secret key for sessions
-app.secret_key = os.getenv('SECRET_KEY', 'your_secret_key')
-
-# Create PostgreSQL connection function
+# PostgreSQL connection function
 def get_postgres_connection():
     try:
         return psycopg2.connect(
-            host=app.config['POSTGRES_HOST'],
-            user=app.config['POSTGRES_USER'],
-            password=app.config['POSTGRES_PASSWORD'],
-            database=app.config['POSTGRES_DB'],
-            port=app.config['POSTGRES_PORT']
+            host=os.getenv('POSTGRES_HOST'),
+            user=os.getenv('POSTGRES_USER'),
+            password=os.getenv('POSTGRES_PASSWORD'),
+            database=os.getenv('POSTGRES_DB'),
+            port=os.getenv('POSTGRES_PORT')
         )
     except psycopg2.Error as e:
-        print(f"Error connecting to PostgreSQL: {e}")
+        print(f"Database connection error: {e}")
         return None
 
 # Password strength validation
@@ -53,81 +41,68 @@ def validate_password_strength(password):
         return "Password should contain at least one digit"
     return None
 
-# Routes for user signup
+# User signup route
 @app.route('/signup', methods=['POST'])
 def signup():
-    cursor = None
-    conn = None
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    confirm_password = data.get('confirm_password')
+    email = data.get('email')
+
+    if password != confirm_password:
+        return jsonify({'error': 'Passwords do not match!'}), 400
+    if not email or not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        return jsonify({'error': 'Invalid email format!'}), 400
+    
+    password_error = validate_password_strength(password)
+    if password_error:
+        return jsonify({'error': password_error}), 400
+    
+    conn = get_postgres_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+    
     try:
-        data = request.get_json()
-        username = data.get('username')
-        password = data.get('password')
-        confirm_password = data.get('confirm_password')
-        email = data.get('email')
-
-        if password != confirm_password:
-            return jsonify({'error': 'Passwords do not match!'}), 400
-        if not email or not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-            return jsonify({'error': 'Invalid email format!'}), 400
-
-        password_error = validate_password_strength(password)
-        if password_error:
-            return jsonify({'error': password_error}), 400
-
-        conn = get_postgres_connection()
-        if not conn:
-            return jsonify({'error': 'Database connection failed'}), 500
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT id FROM users WHERE username = %s OR email = %s", (username, email))
-        if cursor.fetchone():
-            return jsonify({'error': 'Username or Email already exists!'}), 409
-
-        hashed_password = generate_password_hash(password)
-        cursor.execute("INSERT INTO users (username, password_hash, email) VALUES (%s, %s, %s)",
-                       (username, hashed_password, email))
-        conn.commit()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id FROM users WHERE username = %s OR email = %s", (username, email))
+            if cursor.fetchone():
+                return jsonify({'error': 'Username or Email already exists!'}), 409
+            
+            hashed_password = generate_password_hash(password)
+            cursor.execute("INSERT INTO users (username, password_hash, email) VALUES (%s, %s, %s)",
+                           (username, hashed_password, email))
+            conn.commit()
         return jsonify({'message': 'Signup successful!'}), 201
-
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        conn.close()
 
-# Routes for login
+# User login route
 @app.route('/login', methods=['POST'])
 def login():
-    cursor = None
-    conn = None
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    
+    conn = get_postgres_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+    
     try:
-        data = request.get_json()
-        username = data.get('username')
-        password = data.get('password')
-
-        conn = get_postgres_connection()
-        if not conn:
-            return jsonify({'error': 'Database connection failed'}), 500
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT id, password_hash FROM users WHERE username = %s", (username,))
-        user = cursor.fetchone()
-
-        if user and check_password_hash(user[1], password):
-            session['user_id'] = user[0]
-            return jsonify({'message': 'Login successful!'}), 200
-        else:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id, password_hash FROM users WHERE username = %s", (username,))
+            user = cursor.fetchone()
+            
+            if user and check_password_hash(user[1], password):
+                session['user_id'] = user[0]
+                return jsonify({'message': 'Login successful!'}), 200
             return jsonify({'error': 'Invalid credentials!'}), 401
-
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        conn.close()
 
 # Run the application
 if __name__ == "__main__":
